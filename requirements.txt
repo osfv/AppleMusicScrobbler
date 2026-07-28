@@ -1,0 +1,7 @@
+requests
+python-dotenv
+pypresence
+winrt-runtime
+winrt-Windows.Media.Control
+winrt-Windows.Foundation
+winrt-Windows.Storage.Streams
