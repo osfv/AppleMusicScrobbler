@@ -38,7 +38,7 @@ FLUSH_EVERY = 30.0
 MAX_BATCH = 50
 
 
-# ---------- last.fm plumbing ----------
+# lastfm API helper
 
 def sign(params):
     # sorted key+value pairs, then the secret. format is not signed.
@@ -77,7 +77,7 @@ def get_session_key():
     return sess["key"]
 
 
-# ---------- metadata ----------
+# METADATA
 
 # apple music crams "artist - album" into the artist field and leaves album blank.
 # the dash isn't always the same character.
@@ -100,7 +100,6 @@ def parse_metadata(props):
 # apple music puts the whole credit in the artist field: "1300SAINT & Nine
 # Vicious". last.fm wants the primary artist alone, or the play lands on a
 # combined artist page that has no art and counts for nobody.
-#
 # splitting blindly would wreck "Earth, Wind & Fire", so the split only
 # happens when last.fm doesn't recognise the combined name.
 SPLIT_CREDITS = True
@@ -143,7 +142,7 @@ def resolve_artist(credit):
     return result
 
 
-# ---------- state ----------
+# state of class Play:
 
 class Play:
     def __init__(self, props, duration):
@@ -207,7 +206,7 @@ async def apple_session(mgr):
     return None
 
 
-# ---------- the watcher ----------
+# the watcher that watches apple music
 
 async def main():
     sk = get_session_key()
