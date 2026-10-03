@@ -36,6 +36,7 @@ MIN_TRACK_SECONDS = 30
 SCROBBLE_CAP_SECONDS = 240
 FLUSH_EVERY = 30.0
 MAX_BATCH = 50
+HTTP_TIMEOUT = 15
 
 
 # lastfm API helper
@@ -52,7 +53,11 @@ def call(method, params, post=False):
     p["api_key"] = API_KEY
     p["api_sig"] = sign(p)
     p["format"] = "json"
-    r = requests.post(API_ROOT, data=p) if post else requests.get(API_ROOT, params=p)
+    r = (
+        requests.post(API_ROOT, data=p, timeout=HTTP_TIMEOUT)
+        if post
+        else requests.get(API_ROOT, params=p, timeout=HTTP_TIMEOUT)
+    )
     r.raise_for_status()
     body = r.json()
     if "error" in body:
@@ -121,7 +126,9 @@ def lastfm_knows(name):
             },
             timeout=5,
         ).json()
-        return "error" not in body
+        # only error 6 means the artist doesn't exist. rate limits, bad keys and
+        # outages say nothing about the name.
+        return body.get("error") != 6
     except Exception:
         return True  # a network hiccup is no reason to rewrite the credit
 
@@ -150,7 +157,8 @@ class Play:
         self.artist = resolve_artist(self.credit)
         self.album_artist = self.artist
         self.duration = duration
-        self.started_at = int(time.time())
+        self.started_at = None  # set when playback actually starts
+        self.announced = False
         self.elapsed = 0.0
         self.scrobbled = False
 
@@ -197,6 +205,23 @@ def flush(sk):
 
     del pending[:len(batch)]
     print(f"  > scrobbled {len(batch)}")
+
+
+def announce(play, sk):
+    # first tick that's actually playing: stamp the start and send Now Playing.
+    # a track first seen while paused gets this when it resumes.
+    play.announced = True
+    play.started_at = int(time.time())
+    try:
+        call("track.updateNowPlaying", {
+            "artist": play.artist,
+            "track": play.track,
+            "album": play.album,
+            "duration": play.duration or "",
+            "sk": sk,
+        }, post=True)
+    except Exception as e:
+        print(f"  ! nowplaying failed: {e}")
 
 
 async def apple_session(mgr):
@@ -270,21 +295,14 @@ async def main():
                 f"album={current.album!r} [{duration}s, threshold {current.threshold}]"
             )
             if playing:
-                try:
-                    call("track.updateNowPlaying", {
-                        "artist": current.artist,
-                        "track": current.track,
-                        "album": current.album,
-                        "duration": duration or "",
-                        "sk": sk,
-                    }, post=True)
-                except Exception as e:
-                    print(f"  ! nowplaying failed: {e}")
+                announce(current, sk)
             await presence.update(current, position, duration)
             continue
 
         last_pos = position
         if playing:
+            if not current.announced:
+                announce(current, sk)
             current.elapsed += dt
             await presence.update(current, position, duration)
         else:
@@ -302,4 +320,5 @@ async def main():
             last_flush = now
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
