@@ -165,11 +165,14 @@ def artwork_url(artist, track, album):
         queries.append((name + " " + t, "song"))
         queries.append((name + " " + plain(t), "song"))
 
+    # a lookup that errored out isn't a real miss, so don't cache it
+    failed = False
     url = None
     for term, entity in dict.fromkeys(queries):
         try:
             url = _itunes(term, entity, a, solo)
         except Exception:
+            failed = True
             url = None
         if url:
             break
@@ -181,6 +184,7 @@ def artwork_url(artist, track, album):
             try:
                 url = _itunes_catalogue(name, t, alb, a, solo)
             except Exception:
+                failed = True
                 url = None
             if url:
                 break
@@ -188,7 +192,8 @@ def artwork_url(artist, track, album):
     if not url:
         url = _lastfm(a, solo, t, alb)
 
-    _artwork_cache[key] = url
+    if url or not failed:
+        _artwork_cache[key] = url
     return url
 
 

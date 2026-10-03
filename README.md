@@ -49,6 +49,10 @@ You can test a lookup without running the scrobbler:
 
     py presence.py "Rich Amiri" "Never Have I"
 
+The regression tests stub out the Windows APIs, so they run anywhere:
+
+    py -m unittest discover tests
+
 ## When it scrobbles
 
 It polls once a second and only counts time while playback is actually running, so skipping to the end of a track doesn't earn a scrobble.
