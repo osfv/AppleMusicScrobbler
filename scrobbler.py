@@ -3,7 +3,9 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
+import types
 import webbrowser
 from pathlib import Path
 
@@ -24,11 +26,13 @@ except ImportError:
     )
 
 load_dotenv()
-API_KEY = os.environ["LASTFM_API_KEY"]
-API_SECRET = os.environ["LASTFM_API_SECRET"]
-AUMID_MATCH = os.environ.get("APPLE_AUMID_MATCH", "applemusicwin").lower()
+API_KEY = os.environ.get("LASTFM_API_KEY", "").strip()
+API_SECRET = os.environ.get("LASTFM_API_SECRET", "").strip()
+# an empty value would match every media session, browsers included
+AUMID_MATCH = (os.environ.get("APPLE_AUMID_MATCH") or "").strip().lower() or "applemusicwin"
 
 SESSION_FILE = Path(__file__).parent / "session.json"
+PENDING_FILE = Path(__file__).parent / "pending.json"
 API_ROOT = "https://ws.audioscrobbler.com/2.0/"
 
 POLL = 1.0
@@ -36,6 +40,8 @@ MIN_TRACK_SECONDS = 30
 SCROBBLE_CAP_SECONDS = 240
 FLUSH_EVERY = 30.0
 MAX_BATCH = 50
+REPLAY_WINDOW = 10  # a jump back to within this many seconds of the start is a replay
+INVALID_SESSION = 9
 
 
 # lastfm API helper
@@ -53,11 +59,23 @@ def call(method, params, post=False):
     p["api_sig"] = sign(p)
     p["format"] = "json"
     r = requests.post(API_ROOT, data=p) if post else requests.get(API_ROOT, params=p)
-    r.raise_for_status()
-    body = r.json()
+    # last.fm reports errors with a 4xx status and a json body, read the body
+    # first or the error code is lost
+    try:
+        body = r.json()
+    except ValueError:
+        r.raise_for_status()
+        raise
     if "error" in body:
-        raise RuntimeError(f"last.fm {body['error']}: {body.get('message')}")
+        raise LastfmError(body["error"], body.get("message"))
+    r.raise_for_status()
     return body
+
+
+class LastfmError(RuntimeError):
+    def __init__(self, code, message):
+        super().__init__(f"last.fm {code}: {message}")
+        self.code = code
 
 
 def get_session_key():
@@ -169,7 +187,26 @@ class Play:
         return t is not None and not self.scrobbled and self.elapsed >= t
 
 
-pending = []  # dropped on exit, good enough for now
+pending = []  # saved to PENDING_FILE on exit if it can't be sent
+
+
+def load_pending():
+    if not PENDING_FILE.exists():
+        return []
+    try:
+        return [types.SimpleNamespace(**p) for p in json.loads(PENDING_FILE.read_text())]
+    except Exception as e:
+        print(f"  ! couldn't read {PENDING_FILE.name}: {e}")
+        return []
+
+
+def save_pending():
+    if not pending:
+        PENDING_FILE.unlink(missing_ok=True)
+        return
+    fields = ("artist", "track", "album", "album_artist", "duration", "started_at")
+    PENDING_FILE.write_text(json.dumps([{f: getattr(p, f) for f in fields} for p in pending]))
+    print(f"  saved {len(pending)} unsent scrobbles to {PENDING_FILE.name}")
 
 
 def flush(sk):
@@ -193,10 +230,26 @@ def flush(sk):
         call("track.scrobble", params, post=True)
     except Exception as e:
         print(f"  ! flush failed, holding {len(batch)}: {e}")
-        return
+        # a revoked key never recovers, so log in again on the next start
+        if getattr(e, "code", None) == INVALID_SESSION and SESSION_FILE.exists():
+            SESSION_FILE.unlink()
+            print("  ! last.fm rejected the session key. Removed session.json, restart to log in again.")
+        return False
 
     del pending[:len(batch)]
     print(f"  > scrobbled {len(batch)}")
+    return True
+
+
+def position_now(tl, playing, duration):
+    # the timeline is a snapshot taken at last_updated_time and players only
+    # refresh it on play, pause and seek. while playing, add the time since.
+    position = tl.position.total_seconds() if tl.position else 0.0
+    updated = getattr(tl, "last_updated_time", None)
+    if playing and duration and updated:
+        position += max(0.0, time.time() - updated.timestamp())
+        position = min(position, duration)
+    return position
 
 
 async def apple_session(mgr):
@@ -213,22 +266,40 @@ async def main():
     mgr = await SessionManager.request_async()
     presence = DiscordPresence()
 
+    pending.extend(load_pending())
+
+    print("Watching Apple Music. Ctrl+C to stop.\n")
+
+    try:
+        await watch(mgr, presence, sk)
+    finally:
+        while pending and flush(sk):
+            pass
+        save_pending()
+
+
+async def watch(mgr, presence, sk):
     current = None
     last_tick = time.monotonic()
     last_flush = 0.0
     last_pos = 0.0
 
-    print("Watching Apple Music. Ctrl+C to stop.\n")
-
     while True:
+        before = time.monotonic()
         await asyncio.sleep(POLL)
         now = time.monotonic()
         dt = now - last_tick
         last_tick = now
 
-        # machine was asleep, don't count the gap as listening
-        if dt > 5:
+        # machine was asleep, don't count the gap as listening. only the sleep
+        # itself is checked, time spent waiting on last.fm or artwork still counts.
+        if now - before > 5:
             dt = 0.0
+
+        # retries run even while apple music is closed
+        if pending and now - last_flush > FLUSH_EVERY:
+            flush(sk)
+            last_flush = now
 
         s = await apple_session(mgr)
         if s is None:
@@ -247,15 +318,17 @@ async def main():
         playing = pb.playback_status == PlaybackStatus.PLAYING
 
         duration = int(tl.end_time.total_seconds()) if tl.end_time else 0
-        position = tl.position.total_seconds() if tl.position else 0.0
+        position = position_now(tl, playing, duration)
 
         candidate = Play(props, duration)
 
-        # position going backwards on the same track means it restarted
+        # position jumping back to the start on the same track means it
+        # restarted. a seek back mid-track is still the same play.
         replayed = (
             current is not None
             and candidate.key == current.key
             and position + 2 < last_pos
+            and position < REPLAY_WINDOW
         )
 
         if current is None or candidate.key != current.key or replayed:
@@ -297,9 +370,11 @@ async def main():
             flush(sk)
             last_flush = now
 
-        if now - last_flush > FLUSH_EVERY:
-            flush(sk)
-            last_flush = now
 
-
-asyncio.run(main())
+if __name__ == "__main__":
+    if not API_KEY or not API_SECRET:
+        sys.exit("LASTFM_API_KEY and LASTFM_API_SECRET must be set in .env, see .env.example.")
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass

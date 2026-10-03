@@ -2,3 +2,4 @@
 session.json
 __pycache__/
 *.pyc
+pending.json

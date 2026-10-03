@@ -21,7 +21,7 @@ Get an API key from https://www.last.fm/api/account/create, then copy `.env.exam
 
     py scrobbler.py
 
-The first run opens a browser to authorize. Press Enter in the terminal once you've done that. The session gets saved to `session.json` and reused, so it only happens once. Leave the window open while you listen.
+The first run opens a browser to authorize. Press Enter in the terminal once you've done that. The session gets saved to `session.json` and reused, so it only happens once. If Last.fm ever rejects the saved key, `session.json` is removed and the next start asks again. Leave the window open while you listen.
 
 ## Discord
 
@@ -84,7 +84,7 @@ Nothing else leaves your machine. The only outbound requests are to Last.fm and 
 
 Windows only. The capture layer is a Windows API and there's no equivalent path here for macOS or Linux.
 
-Unsent scrobbles are kept in memory, so anything queued is lost if the process dies. Failed submissions retry while it's running, but that's as far as it goes.
+Failed submissions retry every 30 seconds while it's running. On Ctrl+C it tries once more and writes whatever is still unsent to `pending.json`, which gets submitted on the next start. A hard kill or crash still loses the queue.
 
 No tray icon or autostart yet, it's a console window you leave open. The plan is to port it to a C# tray app, persist the queue properly, and move the session key into DPAPI.
 
